@@ -69,14 +69,17 @@ class MovingAverageGatedAttention(nn.Module):
         self.prenorm = prenorm
         self.norm = SequenceNorm(norm_type, embed_dim, affine=norm_affine, export=export)
 
-        self.move = MultiHeadEMA(embed_dim, ndim=ndim, bidirectional=bidirectional, truncation=truncation)
+        #self.move = MultiHeadEMA(embed_dim, ndim=ndim, bidirectional=bidirectional, truncation=truncation)
 
         self.v_proj = nn.Linear(embed_dim, hdim)
-        self.mx_proj = nn.Linear(embed_dim, zdim + hdim + 2 * embed_dim)
+        print("SIZE", self.v_proj.weight.size())
+        self.q_proj = nn.Linear(embed_dim, hdim)
+        #Yself.mx_proj = nn.Linear(embed_dim, zdim + hdim + 2 * embed_dim)
+        self.k_proj = nn.Linear(embed_dim, hdim)
         self.h_proj = nn.Linear(hdim, embed_dim)
 
-        self.gamma = Parameter(torch.Tensor(2, zdim))
-        self.beta = Parameter(torch.Tensor(2, zdim))
+        #self.gamma = Parameter(torch.Tensor(2, zdim))
+        #self.beta = Parameter(torch.Tensor(2, zdim))
 
         self.max_positions = max_positions
         max_positions = max_positions if chunk_size < 0 else chunk_size
@@ -102,15 +105,19 @@ class MovingAverageGatedAttention(nn.Module):
         std = 0.02
         nn.init.normal_(self.v_proj.weight, mean=0.0, std=std)
         nn.init.constant_(self.v_proj.bias, 0.0)
+        nn.init.normal_(self.q_proj.weight, mean=0.0, std=std)
+        nn.init.constant_(self.q_proj.bias, 0.0)
+        nn.init.normal_(self.k_proj.weight, mean=0.0, std=std)
+        nn.init.constant_(self.k_proj.bias, 0.0)
 
-        nn.init.normal_(self.mx_proj.weight, mean=0.0, std=std)
-        nn.init.constant_(self.mx_proj.bias, 0.0)
+        #nn.init.normal_(self.mx_proj.weight, mean=0.0, std=std)
+        #nn.init.constant_(self.mx_proj.bias, 0.0)
 
         nn.init.normal_(self.h_proj.weight, mean=0.0, std=std)
         nn.init.constant_(self.h_proj.bias, 0.0)
 
-        nn.init.normal_(self.gamma, mean=0.0, std=std)
-        nn.init.constant_(self.beta, 0.0)
+        #nn.init.normal_(self.gamma, mean=0.0, std=std)
+        #nn.init.constant_(self.beta, 0.0)
 
     def element_attention(self, q, k, padding_mask, attn_mask, before_attn_fn):
         slen = k.size(2)
@@ -221,24 +228,28 @@ class MovingAverageGatedAttention(nn.Module):
         if self.prenorm:
             x = self.norm(x)
 
-        # L x B x E
-        v = self.activation(self.v_proj(x))
+        # # L x B x E
+        # v = self.activation(self.v_proj(x))
 
-        # L x B x D
-        mx = self.move(x, padding_mask, incremental_state)
-        mx = self.dropout(mx)
+        # # L x B x D
+        # mx = self.move(x, padding_mask, incremental_state)
+        # mx = self.dropout(mx)
 
-        # L x B x D -> L x B x (2*D+S+E)
-        base = self.mx_proj(mx)
-        u, zr, hx = torch.split(base, [self.embed_dim, self.zdim + self.hdim, self.embed_dim], dim=-1)
-        # L x B x D
-        u = torch.sigmoid(u)
-        # L x B x (E+S)
-        z, r = torch.split(F.silu(zr), [self.zdim, self.hdim], dim=-1)
-        # L x B x S -> L x B x 1 x S -> L x B x 2 x S
-        z = z.unsqueeze(2) * self.gamma + self.beta
-        # L x B x 2 x S -> L x B x S
-        q, k = torch.unbind(z, dim=2)
+        # # L x B x D -> L x B x (2*D+S+E)
+        # base = self.mx_proj(mx)
+        # u, zr, hx = torch.split(base, [self.embed_dim, self.zdim + self.hdim, self.embed_dim], dim=-1)
+        # # L x B x D
+        # u = torch.sigmoid(u)
+        # # L x B x (E+S)
+        # z, r = torch.split(F.silu(zr), [self.zdim, self.hdim], dim=-1)
+        # # L x B x S -> L x B x 1 x S -> L x B x 2 x S
+        # z = z.unsqueeze(2) * self.gamma + self.beta
+        # # L x B x 2 x S -> L x B x S
+        # q, k = torch.unbind(z, dim=2)
+
+        v = self.v_proj(x)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
 
         # L x B x D -> B x L x D
         q = q.transpose(0, 1)
@@ -323,7 +334,7 @@ class MovingAverageGatedAttention(nn.Module):
         if padding_mask is not None and padding_mask.dim() == 0:
             padding_mask = None
 
-        if self.attention_activation == 'softmax':
+        if True or self.attention_activation == 'softmax':
             attn_weights = self.softmax_attention(q, k, padding_mask, attn_mask, before_attn_fn)
         else:
             attn_weights = self.element_attention(q, k, padding_mask, attn_mask, before_attn_fn)
@@ -336,10 +347,12 @@ class MovingAverageGatedAttention(nn.Module):
         # B x K x C x E -> B x L x E -> L x B x E
         h = torch.matmul(kernel, v).view(bsz, seq_len, self.hdim).transpose(0, 1)
         # L x B x E -> L x B x D
-        h = self.activation(hx + self.h_proj(h * r))
+        #h = self.activation(hx + self.h_proj(h * r))
+        h = self.h_proj(h)
         h = self.dropout(h)
         # L x B x D
-        out = torch.addcmul(residual, u, h - residual)
+        #out = torch.addcmul(residual, u, h - residual)
+        out = residual+h
 
         if not self.prenorm:
             out = self.norm(out)
